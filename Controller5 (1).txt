@@ -1,0 +1,315 @@
+/*
+ * 3D Scanner.cpp
+ *
+ * Created : 4/2/2024 3:08:57 PM
+ * Author  : chkline
+ * Version : 1.1 Preliminary   
+ *
+ *     [[ This is the main operating code for the 3D Scanner Project ]]
+ *
+ * 1) Initialize communication with PC app, checks for viable connection
+ * 2) Zero out vertical axis
+ * 3) Laser calibration sequence 
+ * 4) Start scanning procedure 
+ *
+ */ 
+
+#include <avr/io.h>     // Header file includes I/O definitions for ATmega328p
+
+// FUNCTION DECLARATIONS -----------------------------------------------------
+void wait(volatile int);                            // Wait function on Timer0
+
+void initialize_usart(void);                                    // USART setup
+void initialize_usart_transmit(void);                           // USART setup
+void TX_usart(int);                               // Transmits a byte by USART
+int RX_usart(void);
+
+void Vert_CW(void);                                       // Steps Vertical CW 
+void Vert_CCW(void);                                     // Steps Vertical CCW
+void Theta_CW(void);                                         // Steps Theta CW
+void Theta_CCW(void);                                       // Steps Theta CCW
+
+// GLOBAL VARIABLE DECLARATIONS ----------------------------------------------
+char Vertical_Phase_Step = 1;              // Wave stepping 1 -> 4 then repeat
+char Theta_Phase_Step = 1;                 // Wave stepping 1 -> 4 then repeat
+int  Laser = 0;                   // Used to store A/D output from PC5 (Laser)
+int  Message_In = 0;               // Used to store responses from Python code 
+
+int  Theta_steps = 0;                           // Sent as an output to python
+int  Vertical_steps = 0;
+int  Vertical_rotations = 0;                    // Sent as an output to python
+
+int  i = 0; // Used to iterate through # of samples for averaging 
+int j =0;
+int  Laser_SUM = 0;
+int  Laser_AVG = 0;
+int  UP = 1;
+int done=0; //when the process is done, this will change to 1
+
+//inputs
+int thetaspots=4; //input how many times you want the plate to stop in the 360 degrees (40 works good)
+int verticalspots=17 ; //input how many times you want the vertical to stop (34 works good)
+
+int main(void)//==============================================================
+{
+	// ASSIGNMENT STATEMENTS -------------------------------------------------
+	DDRB = 1<<PB2 | 1<<PB1;         // Theta | Vertical H-Bridge PWM on Timer1 
+	
+	DDRC = 1<<PC3 | 1<<PC2 | 1<<PC1 | 1<<PC0;      // Vertical stepper outputs
+	PORTC = 0x00;                                    // Initializing ports low 
+	
+	DDRD = 1<<PD7 | 1<<PD6 | 1<<PD5 | 1<<PD4;         // Theta stepper outputs
+	PORTD = 0x00;                                    // Initializing ports low
+	
+	// A/D CONVERSION SETUP --------------------------------------------------
+	PRR = 0x00;          // clear Power Reduction AlDC bit (0) turns on device
+	ADCSRA = 0b10000111;        // (bit7) enable ADC | (bit2-0) 128 pre-scaler
+	ADMUX = 0b00100101;             // Aref Pin Selection | Left Justify | PC5
+	
+	// PWM OUTPUT SETUP ------------------------------------------------------
+	OCR1A = 0x00;              // PB1 (Vertical) Duty cycle = zero (motor off)
+	OCR1B = 0x00;                 // PB2 (Theta) Duty cycle = zero (motor off)
+	TCCR1A = 0b10100011; // OC1A Non-inverting | OC1B Non-inverting | Fast PWM
+	TCCR1B = 0b00000011;     // Sets PWM frequency CS01-0 = 1 (Clock/(256*64))
+	
+	// OTHER -----------------------------------------------------------------
+	
+	initialize_usart();                    // Setup communication lines TX, RX
+	OCR1A = 0x00;                                 // Power to Vertical stepper
+	OCR1B = 0x00;                                    // Power to Theta stepper
+	
+	
+	
+	int Nthetastep=200/thetaspots; //this is the increment amount
+	int Nverticalstep=136/(4*verticalspots);
+	int height=0;
+	
+	
+	
+	
+	
+	
+	
+	while(1) //===============================================================
+	{
+		// Add Zero out function and standby leds?
+	
+		Message_In = RX_usart();  // Waits for and spits out received transmission
+		while (!(Message_In == 244)); // Checks that input from Python is the start
+		
+		
+		for (Theta_steps = 0; Theta_steps < 200; Theta_steps = Theta_steps + Nthetastep)
+		{
+		// Begin scanning sequence
+		for (Vertical_rotations = 0; Vertical_rotations <= 34; Vertical_rotations=Vertical_rotations + Nverticalstep)
+			{
+				// Reading Analog Input
+				
+				Laser_AVG = 0;
+				Laser_SUM = 0;
+				for (i = 0; i < 10; i++)
+				{
+					ADCSRA = ADCSRA | 0b01000000;               // Initializing conversion
+					while ((ADCSRA && 0b00010000) == 0);     // Waiting for conversion end
+					Laser = ADCH;               // Keeping high byte of the 10-bit results
+					Laser_SUM = Laser_SUM + Laser;
+					wait(5);
+				}
+				Laser_AVG = (Laser_SUM/10); 
+				
+				if (UP==1){
+					height=Vertical_rotations;
+				}
+				if (UP==0){
+					height=34-Vertical_rotations;
+				}
+				
+				TX_usart(Theta_steps);           // Sending rotational position in [steps]
+				wait(5);                                   // Gives Python time to process
+				TX_usart(height);                    // Sending full rotations 
+				wait(5);                                   // Gives Python time to process
+				TX_usart(Laser_AVG);                     // Sending average laser A/D data
+				
+				Message_In = RX_usart();                           // Waits for message in 
+				while (!(Message_In == 245));           // Confirms that data was received
+				
+				for (j = 0; j < 48*Nverticalstep; j=j+1)
+				{
+					if (UP == 1)
+					{
+						Vert_CW();
+						wait(5);
+					} else {
+						Vert_CCW();
+						wait(5);
+					}
+				}	 				 
+			}
+			
+			if (UP == 1)
+			{
+				UP = 0;
+			} else {
+				UP = 1; 
+			}
+			
+			for (i = 0; i <= Nthetastep; i++) 
+			{
+				Theta_CCW();
+				wait(5);
+			}
+		}
+		TX_usart(255);
+		TX_usart(255);
+		TX_usart(255);
+	}//=======================================================================
+	
+	
+}//===========================================================================
+
+// FUNCTION DEFINITIONS:
+
+void initialize_usart(void) // function to set up USART
+{
+	UCSR0B = (1<<RXEN0) | (1<<TXEN0); // enable serial transmission for RX and TX
+	UCSR0C = (1<<UCSZ01) | (1<<UCSZ00) ; // Asynchronous mode, 8-bit data; no parity; 1 stop bit
+	UBRR0L = 0x67; // 9,600 baud if Fosc = 16MHz
+}
+
+void TX_usart(int data) // Function to transmit a character
+{
+	while (!(UCSR0A & (1<<UDRE0))); // Poll to make sure transmit buffer is ready, 				// then send data
+	UDR0 = data;
+}
+
+int RX_usart(void)
+{
+	while (!(UCSR0A & 0b10000000));  // Waiting for incoming data
+	return UDR0;                     // Returning oncoming data
+}
+
+void wait(volatile int N) // UTILIZES TIMER0 *****
+{
+	// This subroutine creates a delay equal to multiple*T, where T is 1 msec
+	// Assumes a 16MHz clock frequency for accurate timing
+	while (N > 0) {
+		TCCR0A = 0x00;   // Clear bit0-1, putting Timer/Counter in normal mode
+		TCNT0 = 0;                // pre-load value for testing on count = 250
+		TCCR0B = 0b00000011;               //1<<CS01 | 1<<CS00; TCCR0B = 0x03;
+		// Start TIMER0, Normal mode, crystal clock, prescaler = 64
+		
+		while (TCNT0 < 0xFA);  // exits when count = 250 (requires pre-load of
+		// 0 to make count = 250) CHANGE THIS VALUE FOR CLOCK OTHER THAN 16MHz
+		TCCR0B = 0x00;                                          // Stop TIMER0
+		N--;
+	}
+}
+
+void Vert_CW(void)
+{
+	// Phase 1a = PC0, 1b = PC1, 2a = PC2, 2b = PC3
+	switch (Vertical_Phase_Step) {
+		case 1:
+		// step to 2a (4)
+		PORTC = 0b00001000; // PC3 ON
+		Vertical_Phase_Step = 4;
+		break;
+		case 2:
+		// step to 1a (1)
+		PORTC = 0b00000001; // PC0 ON
+		Vertical_Phase_Step = 1;
+		break;
+		case 3:
+		// step to 2b (2);
+		PORTC = 0b00000100; // PC2 ON
+		Vertical_Phase_Step = 2;
+		break;
+		case 4:
+		// step to 1b (3);
+		PORTC = 0b00000010; // PC1 ON
+		Vertical_Phase_Step = 3;
+	break;  }
+}                   
+          
+void Vert_CCW(void)
+{
+	// Phase 1a = PC0, 1b = PC1, 2a = PC2, 2b = PC3
+	switch (Vertical_Phase_Step) {
+		case 1:
+		// step to 2b (2);
+		PORTC = 0b00001000; // PC3 ON
+		Vertical_Phase_Step = 2;
+		break;
+		case 2:
+		// step to 1b (3);
+		PORTC = 0b00000001; // PC0 ON
+		Vertical_Phase_Step = 3;
+		break;
+		case 3:
+		// step to 2a (4)
+		PORTC = 0b00000100; // PC2 ON
+		Vertical_Phase_Step = 4;
+		break;
+		case 4:
+		// step to 1a (1)
+		PORTC = 0b00000010; // PC1 ON
+		Vertical_Phase_Step = 1;
+	break;  }
+}
+                                  
+void Theta_CCW(void)
+{
+	// Phase 1a = PD4, 1b = PD5, 2a = PD6, 2b = PD7
+	switch (Theta_Phase_Step) {
+		case 1:
+		PORTD = 0b00010000; // PD4 ON //2b
+		Theta_Phase_Step = 2;
+		break;
+		case 2:
+		PORTD = 0b01000000; // PD6 ON //1b
+		Theta_Phase_Step = 3;
+		break;
+		case 3:
+		PORTD = 0b00100000; // PD5 ON //2a
+		Theta_Phase_Step = 4;
+		break;
+		case 4:
+		PORTD = 0b10000000; // PD7 ON //1a
+		Theta_Phase_Step = 1;
+	break;  }
+}
+
+void Theta_CW(void)
+{
+	// Phase 1a = PD4, 1b = PD5, 2a = PD6, 2b = PD7
+	switch (Theta_Phase_Step) {
+		case 1:
+		// step to 2b (2);
+		PORTD = 0b10000000; // PD7 ON
+		Theta_Phase_Step = 4;
+		break;
+		case 2:
+		// step to 1b (3);
+		PORTD = 0b00010000; // PD4 ON
+		Theta_Phase_Step = 1;
+		break;
+		case 3:
+		// step to 2a (4)
+		PORTD = 0b01000000; // PD6 ON
+		Theta_Phase_Step = 2;
+		break;
+		case 4:
+		// step to 1a (1)
+		PORTD = 0b00100000; // PD5 ON
+		Theta_Phase_Step = 3;
+	break;  }
+}
+
+
+// 1) COMMUNICATION INITIALIZATION -----------------------------------
+
+// 2) VERTICAL AXIS CALIBRATION --------------------------------------
+
+// 3) LASER DISTANCE CALIBRATION -------------------------------------
+
+// 4) SCANNING PROCEDURE ---------------------------------------------
